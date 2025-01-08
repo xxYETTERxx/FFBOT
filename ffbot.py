@@ -8,488 +8,431 @@ import sys
 import keyboard
 import atexit
 import librosa
-from scipy import signal
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Any
+from enum import Enum
 
-class FF3AudioBot:
-    def __init__(self):
-        # Audio parameters
-        self.sample_rate = 44100
-        self.block_size = 16384
+class GameState(Enum):
+    EXPLORING = "exploring"
+    BATTLE = "battle"
+    PAUSED = "paused"
+
+@dataclass
+class AudioConfig:
+    sample_rate: int = 44100
+    block_size: int = 16384
+    sample_length: int = 3
+    sample_size: int = 3
+    volume_threshold: float = 0.01
+    baseline_tempo: float = 115
+    tempo_threshold: float = 30
+    buffer_size: int = 5
+    consecutive_detections_needed: int = 3
+
+@dataclass
+class BattleConfig:
+    pre_battle_wait: float = 3.0
+    first_wait: float = 19.0
+    second_wait: float = 8.0
+    final_wait: float = 12.0
+    cooldown: float = 5.0
+    max_duration: float = 120.0
+    cooldown: float = 5.0 
+
+class AudioProcessor:
+    def __init__(self, config: AudioConfig):
+        self.config = config
         self.audio_queue = queue.Queue()
-        self.baseline_tempo = 115  # Fixed baseline tempo for normal music
-        self.tempo_threshold = 25
-        self.tempo_buffer = []
-        self.buffer_size = 5
-        self.calibration_tempos = []
-        self.tempo_offset = 5
-
-        self.is_paused = False
-        self.manual_pause = False
-        self.last_user_input_time = None
-        self.last_toggle_time = 0
-        self.toggle_key = 'p'
-        self.toggle_cooldown = 0.5
-        self.pause_resume_delay = 15.0
-        self.pause_flags = {
-            'movement': False,
-            'audio_processing': False,
-            'battle_sequence': False,
-            'key_monitoring': False
-        }
-
-        self.monitored_keys = [
-            'left', 'right', 'up', 'down',  # Direction keys
-            'enter', 'return',              # Confirm keys
-            'backspace', 'tab',             # Menu navigation
-            'q', 'w', 'e', 'r',            # Common game keys
-            'space', 'p'                         # Additional controls
-        ]
-
-        self.current_activity = None
-
-        self.consecutive_detections_needed = 3  # Need this many high tempos in a row
-        self.current_consecutive_detections = 0
-        self.volume_threshold = 0.01  # Minimum RMS volume to consider audio
-        self.last_battle_end_time = None
-
-        self.volume_buffer = []
-        self.volume_buffer_size = 5
+        self.tempo_buffer: List[float] = []
+        self.volume_buffer: List[float] = []
+        self.current_consecutive_detections: int = 0
         
-        # Wavelet analysis parameters
-        self.levels = 4
-        self.max_decimation = 2**(self.levels-1)
-        self.min_bpm = 90  # Minimum expected BPM
-        self.max_bpm = 180  # Maximum expected BPM
-        
-        # Battle timings (in seconds)
-        self.battle_first_wait = 19.0
-        self.battle_second_wait = 8.0
-        self.battle_final_wait = 12.0
-
-        # Movement parameters
-        self.key_duration = 0.1
-        self.direction = 'right'
-        self.steps_taken = 0
-        self.steps_per_direction = 3  # Number of steps before changing direction
-
-        self.last_battle_end_time = None
-        self.battle_cooldown = 5.0  # Seconds to wait after battle before new detection
-        self.recalibration_samples = []  # Store tempos during recalibration
-        self.recalibration_size = 3  # Number of samples to collect for recalibration
-
-        self.toggle_key = 'p'
-        self.manual_pause = False
-        self.last_toggle_time = 0  # Prevent double-triggers
-        self.toggle_cooldown = 0.5  # Seconds between toggle presses
-            
-        # State control
-        self.is_running = False
-        self.in_battle = False
-        self.start_time = None
-        self.last_print_time = None
-        self.calibration_time = 10
-        
-        # Register cleanup function
-        atexit.register(self.cleanup)
-        
-    def cleanup(self):
-        """Ensure everything is properly cleaned up"""
-        print("\nCleaning up...")
-        self.is_running = False
-        # Release all potentially held keys
-        pyautogui.keyUp('left')
-        pyautogui.keyUp('right')
-        pyautogui.keyUp('enter')
-        
-    def check_exit_conditions(self):
-        """Check if any exit conditions are met"""
-        if keyboard.is_pressed('esc'):
-            print("\nEscape key pressed - stopping bot...")
-            self.cleanup()
-            sys.exit(0)
-            
-    def audio_callback(self, indata, frames, time, status):
-        """Callback function for audio stream"""
-        if status:
-            print(status)
-        self.audio_queue.put(indata.copy())
-    
-    def calculate_tempo(self, audio_data):
-        """Calculate tempo from audio data using librosa"""
+    def calculate_tempo(self, audio_data: np.ndarray) -> float:
         if len(audio_data.shape) > 1:
             audio_data = np.mean(audio_data, axis=1)
         
-        # Convert to mono float32 array
         audio_mono = audio_data.astype(np.float32)
-        
-        # Calculate RMS volume
         rms_volume = np.sqrt(np.mean(audio_mono**2))
         
-        # Store volume in buffer
         self.volume_buffer.append(rms_volume)
-        if len(self.volume_buffer) > self.volume_buffer_size:
+        if len(self.volume_buffer) > self.config.buffer_size:
             self.volume_buffer.pop(0)
         
-        # Only calculate tempo if volume is above threshold
-        if rms_volume < self.volume_threshold:
-            print("Volume too low, skipping tempo calculation")
+        if rms_volume < self.config.volume_threshold:
             return 0.0
             
-        # Calculate onset envelope
         onset_env = librosa.onset.onset_strength(
-            y=audio_mono, 
-            sr=self.sample_rate,
-            hop_length=512,
-            aggregate=np.median,
-            fmax=8000
+            y=audio_mono,
+            sr=self.config.sample_rate,
+            hop_length=512,         
+            aggregate=np.median,        
+            fmax=4000,                          
         )
         
-        # Get tempo using default settings
         tempo = librosa.beat.tempo(
-            onset_envelope=onset_env, 
-            sr=self.sample_rate,
+            onset_envelope=onset_env,
+            sr=self.config.sample_rate,
             hop_length=512,
-            aggregate=None
+            aggregate=None,
+            start_bpm = self.config.baseline_tempo                   
         )[0]
         
         return tempo
-    
-    def process_audio(self, audio_data):
-        """Process audio data with improved battle detection"""
-        if not self.can_perform_activity('audio_processing'):
-            return False
-            
-        self.current_activity = 'audio_processing'
 
-        if self.start_time is None:
-            return False
-
-        current_time = time.time()
-        
-        # Check cooldown first
-        if self.last_battle_end_time is not None:
-            cooldown_elapsed = current_time - self.last_battle_end_time
-            if cooldown_elapsed < self.battle_cooldown:
-                print(f"In cooldown period ({cooldown_elapsed:.1f}s / {self.battle_cooldown:.1f}s)")
-                self.current_consecutive_detections = 0  # Reset detection counter
-                return False
-            else:
-                self.last_battle_end_time = None
-                print("Cooldown complete")
-
-        # Calculate current tempo
+    def detect_battle(self, audio_data: np.ndarray) -> bool:
         current_tempo = self.calculate_tempo(audio_data)
-        if current_tempo == 0.0:  # Volume too low
+        if current_tempo == 0.0:
             self.current_consecutive_detections = 0
             return False
             
-        # Add tempo to buffer
         self.tempo_buffer.append(current_tempo)
-        if len(self.tempo_buffer) > self.buffer_size:
+        if len(self.tempo_buffer) > self.config.buffer_size:
             self.tempo_buffer.pop(0)
+
+        weights = np.linspace(0.5, 1.0, len(self.tempo_buffer))
+        avg_tempo = np.average(self.tempo_buffer, weights=weights)
+        tempo_difference = avg_tempo - self.config.baseline_tempo
         
-        # Use median tempo for more stable detection
         avg_tempo = np.median(self.tempo_buffer)
+        tempo_difference = avg_tempo - self.config.baseline_tempo
+
+        print(f"Current BPM: {avg_tempo:.1f}", flush=True)
+        print(f"Baseline BPM: {self.config.baseline_tempo}", flush=True)
+        print(f"Difference: {tempo_difference:.1f}", flush=True)
+        print(f"Consecutive detections: {self.current_consecutive_detections}", flush=True)
+        print("-" * 30, flush=True) 
         
-        # Check if current tempo exceeds threshold
-        tempo_difference = avg_tempo - self.baseline_tempo
-        
-        # Debug printing
-        if self.last_print_time is None or current_time - self.last_print_time >= 3:
-            print(f"Current tempo: {avg_tempo:.1f} BPM", flush=True)
-            print(f"Baseline tempo: {self.baseline_tempo:.1f} BPM", flush=True)
-            print(f"Tempo difference: {tempo_difference:.1f} BPM", flush=True)
-            print(f"Consecutive detections: {self.current_consecutive_detections}", flush=True)
-            print(f"Average volume: {np.mean(self.volume_buffer):.6f}", flush=True)
-            self.last_print_time = current_time
-        
-        # Update detection counter
-        if tempo_difference > self.tempo_threshold:
+        if tempo_difference > self.config.tempo_threshold:
             self.current_consecutive_detections += 1
         else:
             self.current_consecutive_detections = 0
             
+        return self.current_consecutive_detections >= self.config.consecutive_detections_needed
+
+class InputHandler:
+    def __init__(self):
+        self.toggle_key = 'p'
+        self.last_toggle_time = 0
+        self.toggle_cooldown = 0.5
+        self.pause_resume_delay = 15.0
+        self.last_user_input_time = None
+        self.manual_pause = False
         
-        # Only trigger battle if we have enough consecutive detections
-        if self.current_consecutive_detections >= self.consecutive_detections_needed:
-            self.current_consecutive_detections = 0  # Reset counter
-            return True
-            
-        return False
-
-    # Rest of the class remains the same (move_character, audio_monitoring_thread, run)
-    def handle_battle(self):
-        """Execute the battle macro sequence"""
-        try:
-            print("Executing battle sequence...")
-            
-            # Initial battle commands
-            time.sleep(5) # account for ambush
-            pyautogui.press('backspace')
-            pyautogui.press('down')
-            pyautogui.press('enter')
-            pyautogui.press('right')
-            pyautogui.press('enter')
-            pyautogui.press('right')
-            pyautogui.press('enter')
-            pyautogui.press('right')
-            pyautogui.press('enter')
-            pyautogui.press('q')
-            
-            # First wait period
-            print("Defending...", flush=True)
-            time.sleep(self.battle_first_wait)
-            
-            # Mid-battle commands
-            pyautogui.press('q')
-            
-            # Second wait period
-            print("Wait to attack ...", flush=True)
-            time.sleep(self.battle_second_wait)
-            
-            # Final battle commands
-            for _ in range(8):
-                pyautogui.press('enter')
-            pyautogui.press('q')
-            
-            # Final wait before returning to exploration
-            print("Attacking...", flush=True)
-            time.sleep(self.battle_final_wait)
-            pyautogui.press('enter')
-            pyautogui.press('enter')
-            print("Battle sequence completed", flush=True)
-            time.sleep(2)
-
-            # Quicksave game
-            pyautogui.press('tab')
-            time.sleep(.2)
-            pyautogui.press('up')
-            time.sleep(.2)
-            pyautogui.press('up')
-            time.sleep(.2)
-            pyautogui.press('up')
-            time.sleep(.2)
-            pyautogui.press('enter')
-            time.sleep(.2)
-            pyautogui.press('left')
-            time.sleep(.2)
-            pyautogui.press('enter')
-            time.sleep(.2)
-            pyautogui.press('enter')
-            time.sleep(.2)
-            pyautogui.press('backspace')
-            time.sleep(.2)
-            
-            # Explicitly start exploration mode
-            self.in_battle = False
-            self.steps_taken = 0
-            self.direction = 'right'
-        
-        except Exception as e:
-            print(f"Battle macro error: {e}")
-            self.cleanup()
-            sys.exit(1)
-
-    def move_character(self):
-        """Move the character in a fixed pattern: three steps right, three steps left"""
-        if not self.can_perform_activity('movement'):
-            return
-
-        try:
-            self.check_exit_conditions()
-            self.current_activity = 'movement'
-            
-            # Take a step in current direction
-            key = 'right' if self.direction == 'right' else 'left'
-            pyautogui.keyDown(key)
-            time.sleep(self.key_duration)
-            pyautogui.keyUp(key)
-            
-            # Increment step counter
-            self.steps_taken += 1
-            
-            # Change direction after three steps
-            if self.steps_taken >= self.steps_per_direction:
-                self.direction = 'left' if self.direction == 'right' else 'right'
-                self.steps_taken = 0
-            
-        except Exception as e:
-            print(f"Movement error: {e}")
-            self.cleanup()
-            sys.exit(1)
+        self.monitored_keys = [
+            'left', 'right', 'up', 'down',
+            'enter', 'return', 'backspace', 'tab',
+            'q', 'w', 'e', 'r', 'space', 'p'
+        ]
     
-    def find_vb_cable(self):
-        """Automatically find VB-Cable input device"""
-        devices = sd.query_devices()
-        for i, device in enumerate(devices):
-            if device['max_input_channels'] > 0 and any(name.lower() in device['name'].lower() 
-                for name in ['vb', 'cable', 'virtual']):
-                print(f"Found VB-Cable: {device['name']}")
-                return i
-        print("VB-Cable not found, using default input")
-        return None
-
-    def audio_monitoring_thread(self):
-        """Thread for continuous audio monitoring"""
-        try:
-            # Automatically select VB-Cable
-            device_id = self.find_vb_cable()
-            if device_id is not None:
-                device_info = sd.query_devices(device_id)
-            else:
-                device_info = sd.query_devices(kind='input')
-            
-            channels = min(device_info['max_input_channels'], 2)
-            print(f"\nUsing device: {device_info['name']}")
-            print(f"Channels: {channels}")
-            
-            self.block_size = int(self.sample_rate * 2.0)
-            print(f"Block size: {self.block_size} samples ({self.block_size/self.sample_rate:.3f} seconds)")
-            
-            with sd.InputStream(callback=self.audio_callback,
-                            channels=channels,
-                            samplerate=self.sample_rate,
-                            blocksize=self.block_size,
-                            device=device_id):
-                while self.is_running:
-                    try:
-                        self.check_exit_conditions()
-                        if self.is_paused:
-                            time.sleep(0.1)
-                            continue
-
-                        # Get audio data from queue
-                        try:
-                            audio_data = self.audio_queue.get(timeout=1)
-                        except queue.Empty:
-                            continue
-
-                        # Only process if not in battle and not in cooldown
-                        if not self.in_battle:
-                            if self.process_audio(audio_data):
-                                print("Battle music detected!", flush=True)
-                                self.in_battle = True
-                                self.handle_battle()
-                                self.in_battle = False
-                                # Set cooldown time
-                                self.last_battle_end_time = time.time()
-                                # Only clear tempo buffer, don't reset baseline
-                                self.tempo_buffer.clear()
-                                print("Returning to exploration...", flush=True)
-                                
-                    except Exception as e:
-                        print(f"Audio processing error: {e}")
-                        self.cleanup()
-                        sys.exit(1)
-                        
-        except Exception as e:
-            print(f"Audio monitoring error: {e}")
-            self.cleanup()
-            sys.exit(1)
-
-    def set_pause_state(self, paused):
-        """Centralized method to handle pause state changes"""
+    def check_exit(self) -> bool:
+        if keyboard.is_pressed('esc'):
+            print("\nEscape key pressed - stopping bot...")
+            return True
+        return False
+    
+    def should_pause(self) -> bool:
         current_time = time.time()
         
-        if paused:
-            self.is_paused = True
-            self.pause_flags = {k: True for k in self.pause_flags}
-            
-            # Release any held keys
-            for key in ['left', 'right', 'up', 'down', 'enter', 'space']:
-                pyautogui.keyUp(key)
-                
-            # Clear any pending activities
-            self.current_activity = None
-            
-            if self.manual_pause:
-                print("\nBot manually paused - Press 'p' to resume")
-            else:
-                print("\nBot auto-paused due to user input")
-                self.last_user_input_time = current_time
-                
-        else:
-            if self.manual_pause:  # Only unpause if it was manually paused
-                self.is_paused = False
-                self.manual_pause = False
-                self.pause_flags = {k: False for k in self.pause_flags}
-                self.last_user_input_time = None
-                print("\nBot manually resumed")
-            elif current_time - self.last_user_input_time >= self.pause_resume_delay:
-                self.is_paused = False
-                self.pause_flags = {k: False for k in self.pause_flags}
-                self.last_user_input_time = None
-                print(f"\nNo user input for {self.pause_resume_delay} seconds - Resuming bot")
-
-    def check_user_input(self):
-        """Enhanced user input checking"""
-        current_time = time.time()
-        
-        # Check for toggle key (p key)
+        # Check for manual toggle
         if keyboard.is_pressed(self.toggle_key):
             if current_time - self.last_toggle_time > self.toggle_cooldown:
                 self.manual_pause = not self.manual_pause
                 self.last_toggle_time = current_time
-                self.set_pause_state(self.manual_pause)
-                time.sleep(0.1)
-            return self.is_paused
-
-        # If already manually paused, stay paused
+                if self.manual_pause:
+                    print("\nBot manually paused - Press 'p' to resume")
+                else:
+                    print("\nBot resumed")
+                return self.manual_pause
+                
+        # If manually paused, stay paused
         if self.manual_pause:
             return True
-
+            
         # Check for game input
-        if not self.is_paused:  # Only check if not already paused
-            for key in self.monitored_keys:
-                if keyboard.is_pressed(key):
-                    self.set_pause_state(True)
-                    return True
-
+        if any(keyboard.is_pressed(key) for key in self.monitored_keys):
+            self.last_user_input_time = current_time
+            return True
+            
         # Check for auto-resume
-        if self.is_paused and not self.manual_pause and self.last_user_input_time:
-            self.set_pause_state(False)  # This handles the timing check
+        if self.last_user_input_time:
+            if current_time - self.last_user_input_time >= self.pause_resume_delay:
+                self.last_user_input_time = None
+                print(f"\nNo user input for {self.pause_resume_delay} seconds - Resuming bot")
+                return False
+            return True
+            
+        return False
 
-        return self.is_paused
-
-    def can_perform_activity(self, activity):
-        """Check if an activity can be performed"""
-        return not self.is_paused and not self.pause_flags.get(activity, False)
+class BattleManager:
+    def __init__(self, config: BattleConfig):
+        self.config = config
+        self.battle_count = 0
+        self.target_battles: Optional[int] = None
+        self.battle_times: List[float] = []
+        self.start_time: Optional[float] = None
+        self.last_battle_end_time: Optional[float] = None
+        self.in_cooldown = False
     
-    def run(self):
-        """Main loop with enhanced pause handling"""
-        print("\nStarting FF3 Bot with enhanced pause system...")
+    def execute_battle_sequence(self):
+        """Execute the optimized battle sequence"""
+        def press_key(key: str, wait: float = 0.1):
+            pyautogui.press(key)
+            time.sleep(wait)
+        
+        try:
+            # Initial battle setup
+            self.in_cooldown = True
+            time.sleep(self.config.pre_battle_wait)
+            
+            # Battle menu navigation
+            for key in ['backspace', 'right', 'enter', 'right', 'enter', 
+                       'down', 'enter', 'enter', 'enter', 'right', 
+                       'enter', 'q']:
+                press_key(key, 0.2)
+            
+            # First defense phase
+            time.sleep(self.config.first_wait)
+            press_key('q')
+            
+            # Attack preparation
+            time.sleep(self.config.second_wait)
+            
+            # Execute attacks
+            for _ in range(8):
+                press_key('enter')
+            press_key('q')
+            
+            # Battle completion
+            time.sleep(self.config.final_wait)
+            press_key('enter')
+            press_key('enter')
+            time.sleep(1)
+            
+            # Quicksave
+            for key in ['tab', 'up', 'up', 'up', 'enter', 'left', 'enter', 
+                       'enter', 'backspace']:
+                press_key(key, 0.2)
+            
+            self.complete_battle()
+
+            time.sleep(self.config.cooldown)
+            self.in_cooldown = False
+            
+        except Exception as e:
+            print(f"Battle sequence error: {e}")
+            # Emergency battle exit
+            press_key('q')
+            for _ in range(3):
+                press_key('enter')
+    
+    def complete_battle(self) -> bool:
+        """Update battle statistics and check if target reached"""
+        self.battle_count += 1
+        self.battle_times.append(time.time())
+        self.last_battle_end_time = time.time()
+        
+        elapsed_time = time.time() - self.start_time
+        avg_time = elapsed_time / self.battle_count if self.battle_count > 0 else 0
+        
+        self.consecutive_detections = 0
+        
+        
+        print(f"\nBattle #{self.battle_count} completed!")
+        if self.target_battles:
+            print(f"Battles remaining: {self.target_battles - self.battle_count}")
+        print(f"Average time per battle: {avg_time:.1f} seconds")
+        
+        if self.target_battles and self.battle_count >= self.target_battles:
+            print(f"\nTarget of {self.target_battles} battles reached!")
+            return True
+        return False
+
+class MovementManager:
+    def __init__(self):
+        self.direction = 'right'
+        self.steps_taken = 0
+        self.steps_per_direction = 3
+        self.key_duration = 0.1
+    
+    def move(self):
+        """Execute movement pattern"""
+        try:
+            # Take a step in current direction
+            pyautogui.keyDown(self.direction)
+            time.sleep(self.key_duration)
+            pyautogui.keyUp(self.direction)
+            
+            # Increment step counter
+            self.steps_taken += 1
+            
+            # Change direction after set number of steps
+            if self.steps_taken >= self.steps_per_direction:
+                self.direction = 'left' if self.direction == 'right' else 'right'
+                self.steps_taken = 0
+                
+        except Exception as e:
+            print(f"Movement error: {e}")
+
+class FF3Bot:
+    def __init__(self, target_battles: Optional[int] = None):
+        self.audio_config = AudioConfig()
+        self.battle_config = BattleConfig()
+        
+        self.audio_processor = AudioProcessor(self.audio_config)
+        self.input_handler = InputHandler()
+        self.battle_manager = BattleManager(self.battle_config)
+        self.movement_manager = MovementManager()
+        
+        self.battle_manager.target_battles = target_battles
+        self.state = GameState.EXPLORING
+        self.state = GameState.PAUSED
+        self.is_running = False
+        self.audio_initialized = False
+        
+        atexit.register(self.cleanup)
+    
+    def start(self):
+        """Initialize and start the bot"""
+        print("\nStarting FF3 Bot...")
         print("Controls:")
         print("- Press 'p' to manually pause/resume")
         print("- Any game input will auto-pause")
-        print(f"- Bot will auto-resume after {self.pause_resume_delay} seconds of no input")
+        print("- Bot will auto-resume after 15 seconds of no input")
         print("- Press 'ESC' to stop the bot")
-        print("- Use Ctrl+C in this window to stop")
         
         self.is_running = True
-        self.start_time = time.time()
+        self.battle_manager.start_time = time.time()
         
+        # Start audio thread first
         audio_thread = threading.Thread(target=self.audio_monitoring_thread)
         audio_thread.daemon = True
         audio_thread.start()
         
+        print("\nCalibrating audio baseline (10 seconds)...")
+        self.calibrate_audio()
+        
+        print("\nAudio calibration complete. Starting bot movement...")
+        self.state = GameState.EXPLORING  # Only now change to EXPLORING
+        
         try:
-            while self.is_running:
-                # Centralized pause check
-                if self.check_user_input():
-                    time.sleep(0.1)
-                    continue
-                    
-                # Only proceed if not paused
-                if not self.is_paused:
-                    if not self.in_battle:
-                        self.move_character()
-                    time.sleep(0.1)
-                    
+            self.main_loop()
         except KeyboardInterrupt:
             print("\nBot stopped by user")
         finally:
             self.cleanup()
-            sys.exit(0)
+
+    def calibrate_audio(self):
+        """Wait for initial audio calibration"""
+        calibration_time = 10  # 10 seconds calibration
+        start_time = time.time()
+        
+        while time.time() - start_time < calibration_time:
+            remaining = int(calibration_time - (time.time() - start_time))
+            print(f"\rCalibrating... {remaining} seconds remaining", end="", flush=True)
+            time.sleep(1)
+        
+        print("\nInitial BPM values:")
+        print(f"Baseline: {self.audio_config.baseline_tempo}")
+        self.audio_initialized = True
+    
+    def main_loop(self):
+        """Main bot execution loop"""
+        while self.is_running:
+            try:
+                if self.input_handler.check_exit():
+                    break
+                
+                # Check for pause state
+                if self.input_handler.should_pause():
+                    if self.state != GameState.PAUSED:
+                        self.state = GameState.PAUSED
+                    time.sleep(0.1)
+                    continue
+                elif self.state == GameState.PAUSED:
+                    self.state = GameState.EXPLORING
+
+                if not self.audio_initialized:
+                    time.sleep(0.1)
+                    continue
+                
+                if self.state == GameState.EXPLORING:
+                    self.movement_manager.move()
+                elif self.state == GameState.BATTLE:
+                    self.battle_manager.execute_battle_sequence()
+                    self.state = GameState.EXPLORING
+                
+                time.sleep(0.1)
+                
+            except Exception as e:
+                print(f"Main loop error: {e}")
+                continue
+    
+    def audio_monitoring_thread(self):
+        """Audio monitoring and battle detection thread"""
+        try:
+            device_id = self.find_audio_device()
+            
+            with sd.InputStream(callback=self.audio_callback,
+                              channels=2,
+                              samplerate=self.audio_config.sample_rate,
+                              blocksize=self.audio_config.block_size * self.audio_config.sample_length,
+                              device=device_id):
+                while self.is_running:
+                    try:
+                        if self.state == GameState.PAUSED:
+                            time.sleep(0.1)
+                            continue
+                            
+                        audio_data = self.audio_processor.audio_queue.get(timeout=1)
+
+                        if not self.audio_initialized:
+                            continue
+
+                        if (self.battle_manager.in_cooldown):
+                            continue
+                        
+                        if (self.state == GameState.EXPLORING and 
+                            self.audio_processor.detect_battle(audio_data)):
+                            print("\nBattle detected!")
+                            self.state = GameState.BATTLE
+                            
+                    except queue.Empty:
+                        continue
+                    except Exception as e:
+                        print(f"Audio processing error: {e}")
+                        continue
+                        
+        except Exception as e:
+            print(f"Audio thread error: {e}")
+            self.cleanup()
+            sys.exit(1)
+    
+    def find_audio_device(self) -> Optional[int]:
+        """Find the VB-Cable audio device"""
+        devices = sd.query_devices()
+        for i, device in enumerate(devices):
+            if (device['max_input_channels'] > 0 and 
+                any(name.lower() in device['name'].lower() 
+                    for name in ['vb', 'cable', 'virtual'])):
+                print(f"Found VB-Cable: {device['name']}")
+                return i
+        print("VB-Cable not found, using default input")
+        return None
+    
+    def audio_callback(self, indata: np.ndarray, frames: int, 
+                      time_info: Any, status: Any):
+        """Callback for audio stream"""
+        if status:
+            print(status)
+        self.audio_processor.audio_queue.put(indata.copy())
+    
+    def cleanup(self):
+        """Clean up resources and reset game state"""
+        print("\nCleaning up...")
+        self.is_running = False
+        pyautogui.keyUp('left')
+        pyautogui.keyUp('right')
+        pyautogui.keyUp('enter')
 
 if __name__ == "__main__":
     pyautogui.FAILSAFE = False
@@ -499,11 +442,19 @@ if __name__ == "__main__":
     print("Controls:")
     print("- Press 'ESC' key to stop the bot")
     print("- Press Ctrl+C in this window to stop")
-    time.sleep(5)
+    print("\nHow many battles would you like to complete?")
+    print("(Enter a number, or press Enter for unlimited)")
     
     try:
-        bot = FF3AudioBot()
-        bot.run()
+        target = input("> ").strip()
+        target_battles = int(target) if target else None
+        time.sleep(5)
+        
+        bot = FF3Bot(target_battles)
+        bot.start()
+    except ValueError:
+        print("Invalid input. Please enter a number or press Enter.")
+        sys.exit(1)
     except Exception as e:
         print(f"Fatal error: {e}")
         sys.exit(1)
