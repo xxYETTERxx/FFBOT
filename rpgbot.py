@@ -9,6 +9,8 @@ import keyboard
 import atexit
 import librosa
 from scipy import signal
+import vgamepad as vg
+import keyboard
 
 class FF3AudioBot:
     def __init__(self):
@@ -22,30 +24,15 @@ class FF3AudioBot:
         self.buffer_size = 5
         self.calibration_tempos = []
         self.tempo_offset = 5
+        
+        try:
+            self.gamepad = vg.VX360Gamepad()
+            print("Virtual Xbox controller created successfully")
+        except Exception as e:
+            print(f"Failed to create virtual controller: {e}")
+            sys.exit(1)
 
-        self.is_paused = False
-        self.manual_pause = False
-        self.last_user_input_time = None
-        self.last_toggle_time = 0
-        self.toggle_key = 'p'
-        self.toggle_cooldown = 0.5
-        self.pause_resume_delay = 15.0
-        self.pause_flags = {
-            'movement': False,
-            'audio_processing': False,
-            'battle_sequence': False,
-            'key_monitoring': False
-        }
-
-        self.monitored_keys = [
-            'left', 'right', 'up', 'down',  # Direction keys
-            'enter', 'return',              # Confirm keys
-            'backspace', 'tab',             # Menu navigation
-            'q', 'w', 'e', 'r',            # Common game keys
-            'space', 'p'                         # Additional controls
-        ]
-
-        self.current_activity = None
+        # self.current_activity = None
 
         self.consecutive_detections_needed = 3  # Need this many high tempos in a row
         self.current_consecutive_detections = 0
@@ -55,18 +42,14 @@ class FF3AudioBot:
         self.volume_buffer = []
         self.volume_buffer_size = 5
         
-        # Wavelet analysis parameters
-        self.levels = 4
-        self.max_decimation = 2**(self.levels-1)
-        self.min_bpm = 90  # Minimum expected BPM
-        self.max_bpm = 180  # Maximum expected BPM
-        
         # Battle timings (in seconds)
         self.battle_first_wait = 21.0
         self.battle_second_wait = 10.0
-        self.battle_final_wait = 13.0
+        self.battle_final_wait = 14.0
 
         # Movement parameters
+        self.button_cooldown = 0.1
+        self.last_button_press = 0
         self.key_duration = 0.1
         self.direction = 'right'
         self.steps_taken = 0
@@ -77,11 +60,6 @@ class FF3AudioBot:
         self.recalibration_samples = []  # Store tempos during recalibration
         self.recalibration_size = 5  # Number of samples to collect for recalibration
 
-        self.toggle_key = 'p'
-        self.manual_pause = False
-        self.last_toggle_time = 0  # Prevent double-triggers
-        self.toggle_cooldown = 0.5  # Seconds between toggle presses
-            
         # State control
         self.is_running = False
         self.in_battle = False
@@ -96,11 +74,71 @@ class FF3AudioBot:
         """Ensure everything is properly cleaned up"""
         print("\nCleaning up...")
         self.is_running = False
-        # Release all potentially held keys
-        pyautogui.keyUp('left')
-        pyautogui.keyUp('right')
-        pyautogui.keyUp('enter')
+        if hasattr(self, 'gamepad'):
+            self.gamepad.reset()
+            time.sleep(0.1)
         
+    def press_button(self, button, duration=0.05):
+        """Press and release a virtual controller button"""
+        current_time = time.time()
+        if current_time - self.last_button_press < self.button_cooldown:
+            time.sleep(self.button_cooldown) 
+
+        try:
+            # Map button names to actions
+            if button == 'A':
+                self.gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+            elif button == 'B':
+                self.gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_B)
+            elif button == 'X':
+                self.gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_X)
+            elif button == 'Y':
+                self.gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_Y)
+            elif button == 'START':
+                self.gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_START)
+            elif button == 'BACK':
+                self.gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK)
+            elif button == 'DPAD_UP':
+                self.gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP)
+            elif button == 'DPAD_DOWN':
+                self.gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN)
+            elif button == 'DPAD_LEFT':
+                self.gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT)
+            elif button == 'DPAD_RIGHT':
+                self.gamepad.press_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT)
+
+            self.gamepad.update()
+            time.sleep(duration)
+            
+            # Release the button
+            if button == 'A':
+                self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+            elif button == 'B':
+                self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_B)
+            elif button == 'X':
+                self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_X)
+            elif button == 'Y':
+                self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_Y)
+            elif button == 'START':
+                self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_START)
+            elif button == 'BACK':
+                self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK)
+            elif button == 'DPAD_UP':
+                self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_UP)
+            elif button == 'DPAD_DOWN':
+                self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_DOWN)
+            elif button == 'DPAD_LEFT':
+                self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_LEFT)
+            elif button == 'DPAD_RIGHT':
+                self.gamepad.release_button(button=vg.XUSB_BUTTON.XUSB_GAMEPAD_DPAD_RIGHT)
+                
+            self.gamepad.update()
+            self.last_button_press = time.time()
+            
+        except Exception as e:
+            print(f"Button press error: {e}")   
+
+    
     def check_exit_conditions(self):
         """Check if any exit conditions are met"""
         if keyboard.is_pressed('esc'):
@@ -175,7 +213,7 @@ class FF3AudioBot:
                 print("Cooldown complete")
 
         # Calculate current tempo
-        current_tempo = self.calculate_tempo(audio_data)
+        current_tempo = self.calculate_tempo(audio_data)  # <- pretend this is a module call instead
         if current_tempo == 0.0:  # Volume too low
             self.current_consecutive_detections = 0
             return False
@@ -214,107 +252,84 @@ class FF3AudioBot:
             return True
             
         return False
-
-    # Rest of the class remains the same (move_character, audio_monitoring_thread, run)
+    
     def handle_battle(self):
         """Execute the battle macro sequence"""
         try:
             print("Executing battle sequence...")
             
             # Initial battle commands
-            time.sleep(5) # account for ambush
-            pyautogui.press('backspace')
-            pyautogui.press('right')
-            pyautogui.press('enter')
-            pyautogui.press('right')
-            pyautogui.press('enter')
-            pyautogui.press('right')
-            pyautogui.press('enter')
-            pyautogui.press('right')
-            pyautogui.press('enter')
-            pyautogui.press('q')
+            time.sleep(5)  # Account for ambush
+            self.press_button('B')  # Cancel/back
+            self.press_button('DPAD_RIGHT')
+            self.press_button('A')  # Confirm
+            self.press_button('DPAD_RIGHT')
+            self.press_button('A')
+            self.press_button('DPAD_DOWN')
+            self.press_button('A')
+            self.press_button('A')
+            self.press_button('A')
+            self.press_button('A')
+            self.press_button('DPAD_RIGHT')
+            self.press_button('A')
+            self.press_button('X')  # AutoBattle (FF:PixR)
             
             # First wait period
             print("Defending...", flush=True)
             time.sleep(self.battle_first_wait)
             
-            # Mid-battle commands
-            pyautogui.press('q')
+            self.press_button('X')
             
-            # Second wait period
-            print("Wait to attack ...", flush=True)
+            print("Wait to attack...", flush=True)
             time.sleep(self.battle_second_wait)
             
             # Final battle commands
             for _ in range(8):
-                pyautogui.press('enter')
-            pyautogui.press('q')
+                self.press_button('A')
+            self.press_button('X')
             
-            # # Final wait before returning to exploration
             print("Attacking...", flush=True)
             time.sleep(self.battle_final_wait)
-            pyautogui.press('enter')
-            pyautogui.press('enter')
-            print("Battle sequence completed", flush=True)
-            time.sleep(1)
-
-            # Quicksave game
-            pyautogui.press('tab')
-            time.sleep(.2)
-            pyautogui.press('up')
-            time.sleep(.2)
-            pyautogui.press('up')
-            time.sleep(.2)
-            pyautogui.press('up')
-            time.sleep(.2)
-            pyautogui.press('enter')
-            time.sleep(.2)
-            pyautogui.press('left')
-            time.sleep(.2)
-            pyautogui.press('enter')
-            time.sleep(.2)
-            pyautogui.press('enter')
-            time.sleep(.2)
-            pyautogui.press('backspace')
-            time.sleep(.2)
+            self.press_button('A')
+            self.press_button('A')
             
-            # Explicitly start exploration mode
+            # Quicksave sequence
+            time.sleep(3)
+            self.press_button('Y')  # Menu
+            for _ in range(3):
+                self.press_button('DPAD_UP')
+                time.sleep(0.2)
+            self.press_button('A')
+            time.sleep(0.2)
+            self.press_button('DPAD_LEFT')
+            time.sleep(0.2)
+            self.press_button('A')
+            time.sleep(0.2)
+            self.press_button('A')
+            time.sleep(0.2)
+            self.press_button('B')
+            
+            # Reset battle state
             self.in_battle = False
             self.steps_taken = 0
             self.direction = 'right'
-        
+            
         except Exception as e:
-            print(f"Battle macro error: {e}")
-            self.cleanup()
-            sys.exit(1)
+            print(f"Battle sequence error: {e}")
 
     def move_character(self):
-        """Move the character in a fixed pattern: three steps right, three steps left"""
-        if not self.can_perform_activity('movement'):
-            return
-
+        """Move the character using virtual d-pad"""
         try:
-            self.check_exit_conditions()
-            self.current_activity = 'movement'
+            button = 'DPAD_RIGHT' if self.direction == 'right' else 'DPAD_LEFT'
+            self.press_button(button, duration=self.button_cooldown)
             
-            # Take a step in current direction
-            key = 'right' if self.direction == 'right' else 'left'
-            pyautogui.keyDown(key)
-            time.sleep(self.key_duration)
-            pyautogui.keyUp(key)
-            
-            # Increment step counter
             self.steps_taken += 1
-            
-            # Change direction after three steps
             if self.steps_taken >= self.steps_per_direction:
                 self.direction = 'left' if self.direction == 'right' else 'right'
                 self.steps_taken = 0
-            
+                
         except Exception as e:
             print(f"Movement error: {e}")
-            self.cleanup()
-            sys.exit(1)
     
     def find_vb_cable(self):
         """Automatically find VB-Cable input device"""
@@ -352,10 +367,6 @@ class FF3AudioBot:
                 while self.is_running:
                     try:
                         self.check_exit_conditions()
-                        if self.is_paused:
-                            time.sleep(0.1)
-                            continue
-
                         # Get audio data from queue
                         try:
                             audio_data = self.audio_queue.get(timeout=1)
@@ -384,74 +395,6 @@ class FF3AudioBot:
             print(f"Audio monitoring error: {e}")
             self.cleanup()
             sys.exit(1)
-
-    def set_pause_state(self, paused):
-        """Centralized method to handle pause state changes"""
-        current_time = time.time()
-        
-        if paused:
-            self.is_paused = True
-            self.pause_flags = {k: True for k in self.pause_flags}
-            
-            # Release any held keys
-            for key in ['left', 'right', 'up', 'down', 'enter', 'space']:
-                pyautogui.keyUp(key)
-                
-            # Clear any pending activities
-            self.current_activity = None
-            
-            if self.manual_pause:
-                print("\nBot manually paused - Press 'p' to resume")
-            else:
-                print("\nBot auto-paused due to user input")
-                self.last_user_input_time = current_time
-                
-        else:
-            if self.manual_pause:  # Only unpause if it was manually paused
-                self.is_paused = False
-                self.manual_pause = False
-                self.pause_flags = {k: False for k in self.pause_flags}
-                self.last_user_input_time = None
-                print("\nBot manually resumed")
-            elif current_time - self.last_user_input_time >= self.pause_resume_delay:
-                self.is_paused = False
-                self.pause_flags = {k: False for k in self.pause_flags}
-                self.last_user_input_time = None
-                print(f"\nNo user input for {self.pause_resume_delay} seconds - Resuming bot")
-
-    def check_user_input(self):
-        """Enhanced user input checking"""
-        current_time = time.time()
-        
-        # Check for toggle key (p key)
-        if keyboard.is_pressed(self.toggle_key):
-            if current_time - self.last_toggle_time > self.toggle_cooldown:
-                self.manual_pause = not self.manual_pause
-                self.last_toggle_time = current_time
-                self.set_pause_state(self.manual_pause)
-                time.sleep(0.1)
-            return self.is_paused
-
-        # If already manually paused, stay paused
-        if self.manual_pause:
-            return True
-
-        # Check for game input
-        if not self.is_paused:  # Only check if not already paused
-            for key in self.monitored_keys:
-                if keyboard.is_pressed(key):
-                    self.set_pause_state(True)
-                    return True
-
-        # Check for auto-resume
-        if self.is_paused and not self.manual_pause and self.last_user_input_time:
-            self.set_pause_state(False)  # This handles the timing check
-
-        return self.is_paused
-
-    def can_perform_activity(self, activity):
-        """Check if an activity can be performed"""
-        return not self.is_paused and not self.pause_flags.get(activity, False)
     
     def run(self):
         """Main loop with enhanced pause handling"""
@@ -459,7 +402,6 @@ class FF3AudioBot:
         print("Controls:")
         print("- Press 'p' to manually pause/resume")
         print("- Any game input will auto-pause")
-        print(f"- Bot will auto-resume after {self.pause_resume_delay} seconds of no input")
         print("- Press 'ESC' to stop the bot")
         print("- Use Ctrl+C in this window to stop")
         
@@ -473,15 +415,14 @@ class FF3AudioBot:
         try:
             while self.is_running:
                 # Centralized pause check
-                if self.check_user_input():
-                    time.sleep(0.1)
-                    continue
+                if keyboard.is_pressed('esc'):
+                    print("\nEscape key pressed - stopping bot...")
+                    break
                     
                 # Only proceed if not paused
-                if not self.is_paused:
-                    if not self.in_battle:
-                        self.move_character()
-                    time.sleep(0.1)
+                if not self.in_battle:
+                    self.move_character()  
+                time.sleep(0.1)
                     
         except KeyboardInterrupt:
             print("\nBot stopped by user")
@@ -504,3 +445,13 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Fatal error: {e}")
         sys.exit(1)
+
+#  try:
+#     bpm_results = bpm_detector.get_bpm()  # Gets latest data from queue
+#     if bpm_results:  # If we got a valid reading
+#         if bpm_results['bpm'] > threshold:
+#             # Handle battle detection
+#             pass
+# except queue.Empty:
+#     # Queue was empty, just continue
+#     pass
