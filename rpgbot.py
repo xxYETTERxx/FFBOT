@@ -12,19 +12,21 @@ from scipy import signal
 import vgamepad as vg
 import keyboard
 from bpm_detector import BPMDetector
+from typing import Dict, List, Optional, Any
 
 sys.stdout.reconfigure(line_buffering=True)
 
 class FF3AudioBot:
-    def __init__(self):
+    def __init__(self, target_battles: Optional[int] = None):
         # Audio parameters
 
         self.bpm_detector = BPMDetector()
         self.audio_stream = self.bpm_detector.setup_audio_stream()
         self.audio_stream.start()
 
-        self.min_bpm_gate = 150  # Fixed baseline tempo for normal music
-        self.max_bpm_gate = 140
+        self.min_bpm_gate = 142  # Fixed baseline tempo for normal music
+        self.max_bpm_gate = 160
+        self.current_bpm = None
         #self.tempo_threshold = 25
         
         try:
@@ -33,20 +35,14 @@ class FF3AudioBot:
         except Exception as e:
             print(f"Failed to create virtual controller: {e}")
             sys.exit(1)
-
-        # self.current_activity = None
-
-        self.consecutive_detections_needed = 3  # Need this many high tempos in a row
-        self.current_consecutive_detections = 0
-        self.volume_threshold = 0.01  # Minimum RMS volume to consider audio
-
-        self.volume_buffer = []
-        self.volume_buffer_size = 5
         
         # Battle timings (in seconds)
-        self.battle_first_wait = 21.0
+        self.battle_first_wait = 12.0
         self.battle_second_wait = 10.0
-        self.battle_final_wait = 8.0
+        self.battle_final_wait = 23.0
+        
+        self.num_battles = 0
+        self.target_battles = target_battles
 
         # Movement parameters
         self.button_cooldown = 0.1
@@ -67,6 +63,10 @@ class FF3AudioBot:
         self.start_time = None
         self.last_print_time = None
         self.calibration_time = 10
+
+        self.quicksave_on = True
+
+        self.after_battle_inc = 10
         
         # Register cleanup function
         atexit.register(self.cleanup)
@@ -175,13 +175,14 @@ class FF3AudioBot:
         if current_tempo:
             librosa_bpm = current_tempo['librosa']['bpm']
             aubio_bpm = current_tempo['aubio']['bpm']
+            self.current_bpm = librosa_bpm
             if self.last_print_time is None or current_time - self.last_print_time >= 3:
                 print(f"Current tempo Librosa: {current_tempo['librosa']['bpm']:.1f} BPM", flush=True)
-                print(f"Current tempo Aubio: {current_tempo['aubio']['bpm']:.1f} BPM", flush=True)
+                #print(f"Current tempo Aubio: {current_tempo['aubio']['bpm']:.1f} BPM", flush=True)
                 print(f"--------------------------", flush=True)
                 self.last_print_time = current_time
 
-            if librosa_bpm > self.max_bpm_gate and aubio_bpm > self.min_bpm_gate:
+            if librosa_bpm > self.max_bpm_gate: #and aubio_bpm > self.min_bpm_gate:
                 return True
                 
             return False
@@ -189,13 +190,22 @@ class FF3AudioBot:
             
         return False
     
+    def get_bpm(self):
+        """Get BPM readings directly from the BPM detector"""
+        try:
+            return self.bpm_detector.get_bpm()
+        except Exception as e:
+            print(f"Error getting BPM: {e}")
+            return None
+    
     def handle_battle(self):
         """Execute the battle macro sequence"""
         try:
             print("Executing battle sequence...")
+            self.num_battles += 1
             
             # Initial battle commands
-            time.sleep(5)  # Account for ambush
+            time.sleep(0.1)  # Account for ambush
             self.press_button('X')  # Cancel/back
             # self.press_button('DPAD_RIGHT')
             # self.press_button('A')  # Confirm
@@ -228,22 +238,24 @@ class FF3AudioBot:
             time.sleep(self.battle_final_wait)
             self.press_button('A')
             self.press_button('A')
+            print(f"{self.num_battles} battles complete!")
             
+            self.after_battle_actions()
             # Quicksave sequence
-            time.sleep(3)
-            self.press_button('Y')  # Menu
-            for _ in range(3):
-                self.press_button('DPAD_UP')
-                time.sleep(0.2)
-            self.press_button('A')
-            time.sleep(0.2)
-            self.press_button('DPAD_LEFT')
-            time.sleep(0.2)
-            self.press_button('A')
-            time.sleep(0.2)
-            self.press_button('A')
-            time.sleep(0.2)
-            self.press_button('B')
+            # time.sleep(3)
+            # self.press_button('Y')  # Menu
+            # for _ in range(3):
+            #     self.press_button('DPAD_UP')
+            #     time.sleep(0.2)
+            # self.press_button('A')
+            # time.sleep(0.2)
+            # self.press_button('DPAD_LEFT')
+            # time.sleep(0.2)
+            # self.press_button('A')
+            # time.sleep(0.2)
+            # self.press_button('A')
+            # time.sleep(0.2)
+            # self.press_button('B')
             
             # Reset battle state
             self.in_battle = False
@@ -252,7 +264,7 @@ class FF3AudioBot:
             
         except Exception as e:
             print(f"Battle sequence error: {e}")
-
+    
     def move_character(self):
         """Move the character using virtual d-pad"""
         try:
@@ -266,7 +278,47 @@ class FF3AudioBot:
                 
         except Exception as e:
             print(f"Movement error: {e}")
-    
+
+    def after_battle_actions(self):
+        """Custom actions for inbetween battles"""
+        try:
+            if self.quicksave_on:
+                time.sleep(3)
+                self.press_button('Y')  # Menu
+                for _ in range(3):
+                    self.press_button('DPAD_UP')
+                    time.sleep(0.2)
+                self.press_button('A')
+                time.sleep(0.2)
+                self.press_button('DPAD_LEFT')
+                time.sleep(0.2)
+                self.press_button('A')
+                time.sleep(0.2)
+                self.press_button('A')
+                time.sleep(0.2)
+                self.press_button('B')
+            if self.num_battles % self.after_battle_inc == 0:
+                # compelete custom macros
+                print("Executing custom macro")
+                time.sleep(0.1)
+                self.press_button('Y')
+                self.press_button('DPAD_DOWN')
+                self.press_button('A')
+                self.press_button('A')
+                self.press_button('A')
+                self.press_button('DPAD_DOWN')
+                self.press_button('DPAD_DOWN')
+                self.press_button('DPAD_RIGHT')
+                self.press_button('A')
+                self.press_button('DPAD_LEFT')
+                self.press_button('A')
+                for _ in range(5):
+                    self.press_button('B')
+
+        except Exception as e:
+            print(f"Movement error: {e}")
+              
+
     def audio_monitoring_thread(self):
         """Thread for continuous audio monitoring"""
         
@@ -297,12 +349,6 @@ class FF3AudioBot:
     
     def run(self):
         """Main loop with enhanced pause handling"""
-        print("\nStarting FF3 Bot with enhanced pause system...")
-        print("Controls:")
-        print("- Press 'p' to manually pause/resume")
-        print("- Any game input will auto-pause")
-        print("- Press 'ESC' to stop the bot")
-        print("- Use Ctrl+C in this window to stop")
         
         self.is_running = True
         self.start_time = time.time()
@@ -314,6 +360,11 @@ class FF3AudioBot:
         
         try:
             while self.is_running:
+                if self.num_battles == self.target_battles:
+                    print(f"{self.num_battles} complete. Stopping bot")
+                    self.cleanup()
+                    sys.exit(0)
+
                 if keyboard.is_pressed('esc'):
                     print("\nEscape key pressed - stopping bot...")
                     break
@@ -335,10 +386,15 @@ if __name__ == "__main__":
     print("Controls:")
     print("- Press 'ESC' key to stop the bot")
     print("- Press Ctrl+C in this window to stop")
+    print("\nHow many battles would you like to complete?")
+    print("(Enter a number, or press Enter for unlimited)")
     time.sleep(5)
     
     try:
-        bot = FF3AudioBot()
+        target = input("> ").strip()
+        target_battles = int(target) if target else None
+        time.sleep(5)
+        bot = FF3AudioBot(target_battles)
         bot.run()
     except Exception as e:
         print(f"Fatal error: {e}")

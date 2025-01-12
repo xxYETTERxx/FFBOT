@@ -12,14 +12,14 @@ class BPMDetector:
         # Audio parameters
         self.sample_rate = 44100
         self.block_size = 44100  
-        self.hop_size = 256  
+        self.hop_size = 512  
         self.audio_queue = queue.Queue()
         self.volume_threshold = 0.01
         self.audio_data = None
         
         # Initialize aubio tempo detection with 'complex' method
         self.tempo = aubio.tempo(
-            method="complex",
+            method="phase",
             buf_size=self.hop_size * 4,
             hop_size=self.hop_size,
             samplerate=self.sample_rate
@@ -87,7 +87,7 @@ class BPMDetector:
             sr=self.sample_rate,
             hop_length=512,
             aggregate=np.median,
-            fmax=4000
+            fmax=8000
         )
         
         # Get tempo using default settings
